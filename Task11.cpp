@@ -12,66 +12,105 @@
 #include "TAxis.h"
 #include "TLine.h"
 #include "TLegend.h"
+#include "TMath.h"
 #include "TGraph.h"
 
-static TH1D *h1 = nullptr; // Гистограмма для data_1.dat
-static TH1D *h2 = nullptr; // Гистограмма для data_2.dat
+static TH1D *h1_11 = nullptr; 
+static TH1D *h2_11 = nullptr; 
+static std::vector<double> data1;
+static std::vector<double> data2;
 
-// Функция для минимизации: -2 ln(L), используя TMath::Poisson
-void fcn(Int_t &npar, Double_t *gin, Double_t &f, Double_t *par, Int_t iflag) {
+// Функция вычисления -2 ln(L)
+void fcn_11(Int_t &npar, Double_t *gin, Double_t &f, Double_t *par, Int_t iflag) {
     double neg2lnL = 0.0;
 
-    // Нормировка гаусса:
-    // плотность: (1/(sigma*sqrt(2*pi))) * exp(-((x-mean)^2/(2*sigma^2)))
-    // Число событий под гауссом = par[1], значит в каждом бине:
-    // M_i = par[0] + par[1]*(Gauss_плотность_в_центре_бина)
-    // Ширина бина = 1, поэтому просто берем значение плотности для данного x.
-
-    for (int i = 1; i <= h1->GetNbinsX(); i++) {
-        double x = h1->GetBinCenter(i);
-        int N = (int)h1->GetBinContent(i);
+    // h1_11: M = par[0] + (par[1]/(sigma*sqrt(2*pi)))*exp(-...)
+    for (int i = 1; i <= h1_11->GetNbinsX(); i++) {
+        double x = h1_11->GetBinCenter(i);
+        int N = (int)h1_11->GetBinContent(i);
 
         double gauss_val = (par[1]/(par[3]*std::sqrt(2*M_PI))) *
                            std::exp(-0.5*(x - par[2])*(x - par[2])/(par[3]*par[3]));
         double M = par[0] + gauss_val;
         if (M <= 0) M = 1e-9;
-
-        // Расчет вероятности наблюдать N при ожидаемом M по Пуассону
         double p = TMath::Poisson(N, M);
-
-        // -2 ln(L) сумма по всем бинам
-        if (p > 0) {
-            neg2lnL += -2.0 * std::log(p);
-        } else {
-            // Если p=0, добавим большой штраф, чтобы M никогда не был отрицательным или слишком маленьким
-            neg2lnL += 1e10; 
-        }
+        neg2lnL += (p>0) ? -2.0*std::log(p) : 1e10;
     }
 
-    // Аналогично для h2, где нет сигнала, только фон par[0]
-    for (int i = 1; i <= h2->GetNbinsX(); i++) {
-        int N = (int)h2->GetBinContent(i);
+    // h2_11: M = par[0]
+    for (int i = 1; i <= h2_11->GetNbinsX(); i++) {
+        int N = (int)h2_11->GetBinContent(i);
         double M = par[0];
         if (M <= 0) M = 1e-9;
         double p = TMath::Poisson(N, M);
-        if (p > 0) {
-            neg2lnL += -2.0 * std::log(p);
-        } else {
-            neg2lnL += 1e10;
-        }
+        neg2lnL += (p>0) ? -2.0*std::log(p) : 1e10;
     }
 
     f = neg2lnL;
 }
 
+// Функция для фитирования с разным количеством бинов
+double FitWithBinning_11(int nbins) {
+    // Создаем локальные гистограммы с уникальными именами
+    TH1D *h1local = new TH1D(Form("h1_11_%d",nbins),"Data 1 local",nbins,500,600);
+    TH1D *h2local = new TH1D(Form("h2_11_%d",nbins),"Data 2 local",nbins,500,600);
+
+    for (auto val : data1) {
+        if(val>=500 && val<=600) h1local->Fill(val);
+    }
+    for (auto val : data2) {
+        if(val>=500 && val<=600) h2local->Fill(val);
+    }
+
+    // Сохраняем глобальные указатели
+    TH1D *oldh1 = h1_11;
+    TH1D *oldh2 = h2_11;
+
+    // Переключаем на локальные для фита
+    h1_11 = h1local;
+    h2_11 = h2local;
+
+    TMinuit *gMin = new TMinuit(4);
+    gMin->SetFCN(fcn_11);
+
+    double p0=5.0;
+    double p1=40.0;
+    double p2=550.0;
+    double p3=10.0;
+    double step=0.1;
+    gMin->DefineParameter(0,"const", p0, step, 0, 1e6);
+    gMin->DefineParameter(1,"amplitude", p1, step, 0, 1e6);
+    gMin->DefineParameter(2,"mean", p2, step, 500, 600);
+    gMin->DefineParameter(3,"sigma", p3, step, 0.1, 100);
+
+    gMin->Command("MIGRAD");
+    gMin->Command("HESSE");
+
+    double par[4], err[4];
+    for (int i=0;i<4;i++){
+        gMin->GetParameter(i,par[i],err[i]);
+    }
+
+    double N_signal = par[1];
+
+    // Возвращаем глобальные гистограммы
+    h1_11 = oldh1;
+    h2_11 = oldh2;
+
+    // Удаляем временные
+    delete h1local;
+    delete h2local;
+    delete gMin;
+
+    return N_signal;
+}
+
+
 void task11() {
-    gStyle->SetOptStat(1);
+    gStyle->SetOptStat(0);
     gStyle->SetOptFit(0);
 
-    // Создаем гистограммы
-    h1 = new TH1D("h1","Data 1",100,500,600);
-    h2 = new TH1D("h2","Data 2",100,500,600);
-
+    // Считываем данные
     {
         std::ifstream in("data_1.dat");
         if(!in) {
@@ -80,7 +119,7 @@ void task11() {
         }
         double val;
         while(in >> val) {
-            if(val>=500 && val<=600) h1->Fill(val);
+            data1.push_back(val);
         }
         in.close();
     }
@@ -93,19 +132,30 @@ void task11() {
         }
         double val;
         while(in >> val) {
-            if(val>=500 && val<=600) h2->Fill(val);
+            data2.push_back(val);
         }
         in.close();
     }
 
+    // Основной фит с 100 бинами
+    int nbins_default = 100;
+    h1_11 = new TH1D("h1_11","Data 1",nbins_default,500,600);
+    h2_11 = new TH1D("h2_11","Data 2",nbins_default,500,600);
+
+    for (auto val : data1) {
+        if(val>=500 && val<=600) h1_11->Fill(val);
+    }
+    for (auto val : data2) {
+        if(val>=500 && val<=600) h2_11->Fill(val);
+    }
+
     TMinuit *gMinuit = new TMinuit(4);
-    gMinuit->SetFCN(fcn);
+    gMinuit->SetFCN(fcn_11);
 
-    double p0=5.0;   // const фон
-    double p1=40.0;  // amplitude (общее число событий под гауссом)
-    double p2=550.0; // mean
-    double p3=10.0;  // sigma
-
+    double p0=5.0;
+    double p1=40.0;
+    double p2=550.0;
+    double p3=10.0;
     double step=0.1;
     gMinuit->DefineParameter(0,"const", p0, step, 0, 1e6);
     gMinuit->DefineParameter(1,"amplitude", p1, step, 0, 1e6);
@@ -120,50 +170,21 @@ void task11() {
         gMinuit->GetParameter(i,par[i],err[i]);
     }
 
-    // Подсчитаем финальное значение -2ln(L)
-    double final_n2lnL;
-    {
-        Int_t npar=4;
-        Double_t *gin=0;
-        Int_t iflag=0;
-        fcn(npar, gin, final_n2lnL, par, iflag);
-    }
-
-    int nparams = 4;
-    int nbins_total = h1->GetNbinsX() + h2->GetNbinsX();
-    int ndof = nbins_total - nparams;
-
-    // Число событий под гауссом = par[1], ошибка = err[1]
     double N_signal = par[1];
     double N_signal_err = err[1];
 
-    // Проверка интеграла гауссианы:
-    // Интеграл гаусса от -∞ до +∞ с коэффициентом должен дать N_signal.
-    // Проверим:
-    {
-        TF1 *gaussCheck = new TF1("gaussCheck","[0]/([2]*sqrt(2*pi))*exp(-0.5*((x-[1])*(x-[1]))/([2]*[2]))",-1e6,1e6);
-        gaussCheck->SetParameters(par[1],par[2],par[3]);
-        double numeric_integral = gaussCheck->Integral(-1e6,1e6);
-        std::cout << "Число событий под гауссом (числ. интеграл) = " << numeric_integral << std::endl;
-        delete gaussCheck;
-    }
+    // Вывод результатов
+    std::cout << "N_signal = " << N_signal << " ± " << N_signal_err << std::endl;
 
-    std::cout << "Результаты подгонки (MLE):" << std::endl;
-    std::cout << "const = " << par[0] << " ± " << err[0] << std::endl;
-    std::cout << "amplitude (N_signal) = " << par[1] << " ± " << err[1] << std::endl;
-    std::cout << "mean = " << par[2] << " ± " << err[2] << std::endl;
-    std::cout << "sigma = " << par[3] << " ± " << err[3] << std::endl;
-    std::cout << "-2ln(L) = " << final_n2lnL << ", d.o.f = " << ndof << std::endl;
-
-    // Построение гистограмм с подгонкой
+    // Построение гистограмм с подгонкой (как было раньше)
     TCanvas *c = new TCanvas("c","Fits",1200,600);
     c->Divide(2,1);
 
     c->cd(1);
-    h1->SetMarkerStyle(20);
-    h1->SetMarkerColor(kBlue);
-    h1->SetTitle("Data 1 with ML fit; x; counts");
-    h1->Draw("E");
+    h1_11->SetMarkerStyle(20);
+    h1_11->SetMarkerColor(kBlue);
+    h1_11->SetTitle("Data 1 with ML fit; x; counts");
+    h1_11->Draw("E");
 
     TF1 *f1 = new TF1("f1","[0] + ([1]/([3]*sqrt(2*pi)))*exp(-0.5*((x-[2])*(x-[2]))/([3]*[3]))",500,600);
     f1->SetParameters(par[0],par[1],par[2],par[3]);
@@ -172,16 +193,16 @@ void task11() {
 
     {
         TLegend *leg = new TLegend(0.65,0.75,0.9,0.9);
-        leg->AddEntry(h1,"Data 1","p");
+        leg->AddEntry(h1_11,"Data 1","p");
         leg->AddEntry(f1,"Const+Gauss (MLE)","l");
         leg->Draw();
     }
 
     c->cd(2);
-    h2->SetMarkerStyle(20);
-    h2->SetMarkerColor(kBlue);
-    h2->SetTitle("Data 2 with ML fit; x; counts");
-    h2->Draw("E");
+    h2_11->SetMarkerStyle(20);
+    h2_11->SetMarkerColor(kBlue);
+    h2_11->SetTitle("Data 2 with ML fit; x; counts");
+    h2_11->Draw("E");
 
     TF1 *f2 = new TF1("f2","[0]",500,600);
     f2->SetParameter(0,par[0]);
@@ -190,7 +211,7 @@ void task11() {
 
     {
         TLegend *leg2 = new TLegend(0.65,0.75,0.9,0.9);
-        leg2->AddEntry(h2,"Data 2","p");
+        leg2->AddEntry(h2_11,"Data 2","p");
         leg2->AddEntry(f2,"Const (MLE)","l");
         leg2->Draw();
     }
@@ -198,16 +219,40 @@ void task11() {
     c->Update();
     c->SaveAs("ml_fit_results.png");
 
-    // Построим контуры ошибок для двух параметров, например (const, amplitude)
-    // Устанавливаем error def для контуров ошибок
+    // Построить зависимость N_signal от числа бинов
+    std::vector<int> binNumbers = {50,75,100,125,150};
+    std::vector<double> Nsignals;
+    for (auto nb : binNumbers) {
+        double Nsig = FitWithBinning_11(nb);
+        Nsignals.push_back(Nsig);
+    }
+
+    TCanvas *c2 = new TCanvas("c2","N_signal vs bins",800,600);
+    TGraph *gNvsBins = new TGraph((int)binNumbers.size());
+    for (size_t i = 0; i < binNumbers.size(); i++) {
+        gNvsBins->SetPoint((int)i, binNumbers[i], Nsignals[i]);
+    }
+    gNvsBins->SetTitle("N_{signal} vs number of bins;number of bins;N_{signal}");
+    gNvsBins->SetMarkerStyle(20);
+    gNvsBins->Draw("AP");
+    c2->SaveAs("Nsignal_vs_bins.png");
+
+    // Построение контуров ошибок
+    // Сначала внутренний контур при текущем ErrorDef=1
+    TCanvas *c3 = new TCanvas("c3","Errors Contour",600,600);
+    TGraph *gr_inner = (TGraph*)gMinuit->Contour(40,0,1); // внутренний контур
+
+    // Теперь устанавливаем другой ErrorDef для внешнего контура
     gMinuit->SetErrorDef(2.25);
+    TGraph *gr_outer = (TGraph*)gMinuit->Contour(40,0,1);
 
-    TCanvas *c2 = new TCanvas("c2","Contours",800,600);
-    TGraph *gr12 = (TGraph*)gMinuit->Contour(40,0,1); // Контур по параметрам const vs amplitude
-    gr12->SetTitle("Errors Contour; const; amplitude");
-    gr12->SetFillColor(42);
-    gr12->Draw("ALF");
-
-    // Сохраним для наглядности
-    c2->SaveAs("errors_contour.png");
+    if (gr_outer) {
+        gr_outer->SetTitle("Errors Contour; const; amplitude");
+        gr_outer->SetFillColor(42);
+        gr_outer->Draw("ALF");
+        if(gr_inner) gr_inner->Draw("C");
+        c3->SaveAs("errors_contour.png");
+    } else {
+        std::cerr << "Не удалось построить внешний контур" << std::endl;
+    }
 }
