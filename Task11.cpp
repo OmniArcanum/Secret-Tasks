@@ -10,173 +10,204 @@
 #include "TF1.h"
 #include "TStyle.h"
 #include "TAxis.h"
+#include "TLine.h"
 #include "TLegend.h"
-#include "TMath.h"
 #include "TGraph.h"
 
-// Глобальные переменные для хранения гистограмм
-// Эти переменные используются в функции правдоподобия
-static TH1D *g_h1 = nullptr; // Первая гистограмма (Data 1)
-static TH1D *g_h2 = nullptr; // Вторая гистограмма (Data 2)
+static TH1D *h1 = nullptr; // Гистограмма для data_1.dat
+static TH1D *h2 = nullptr; // Гистограмма для data_2.dat
 
-// Функция для минимизации (FCN)
-// Используется метод максимального правдоподобия для данных, распределенных по Пуассону
-void fcn_poisson(Int_t &npar, Double_t *gin, Double_t &f, Double_t *par, Int_t iflag) {
-    double neg2logL = 0.0; // -2 * логарифм функции правдоподобия
+// Функция для минимизации: -2 ln(L), используя TMath::Poisson
+void fcn(Int_t &npar, Double_t *gin, Double_t &f, Double_t *par, Int_t iflag) {
+    double neg2lnL = 0.0;
 
-    // Извлечение параметров из массива par
-    double cst = par[0];    // Постоянный фон
-    double A = par[1];      // Амплитуда нормального распределения
-    double mean = par[2];   // Среднее значение нормального распределения
-    double sigma = par[3];  // Стандартное отклонение нормального распределения
+    // Нормировка гаусса:
+    // плотность: (1/(sigma*sqrt(2*pi))) * exp(-((x-mean)^2/(2*sigma^2)))
+    // Число событий под гауссом = par[1], значит в каждом бине:
+    // M_i = par[0] + par[1]*(Gauss_плотность_в_центре_бина)
+    // Ширина бина = 1, поэтому просто берем значение плотности для данного x.
 
-    // Проверка допустимых значений параметров
-    if (sigma <= 0) {
-        f = 1e20; // Устанавливаем большое значение функции для исключения
-        return;
-    }
+    for (int i = 1; i <= h1->GetNbinsX(); i++) {
+        double x = h1->GetBinCenter(i);
+        int N = (int)h1->GetBinContent(i);
 
-    // Вычисление ширины бинa для первой гистограммы
-    double bw1 = (g_h1->GetXaxis()->GetXmax() - g_h1->GetXaxis()->GetXmin()) / g_h1->GetNbinsX();
+        double gauss_val = (par[1]/(par[3]*std::sqrt(2*M_PI))) *
+                           std::exp(-0.5*(x - par[2])*(x - par[2])/(par[3]*par[3]));
+        double M = par[0] + gauss_val;
+        if (M <= 0) M = 1e-9;
 
-    // Проходим по всем бинам первой гистограммы
-    for (int i = 1; i <= g_h1->GetNbinsX(); ++i) {
-        double n = g_h1->GetBinContent(i); // Количество событий в бине
-        double x = g_h1->GetBinCenter(i); // Центр бинa
-        double mu = (cst + A * std::exp(-0.5 * (x - mean) * (x - mean) / (sigma * sigma))) * bw1; // Ожидаемое число событий
+        // Расчет вероятности наблюдать N при ожидаемом M по Пуассону
+        double p = TMath::Poisson(N, M);
 
-        // Проверка на корректность mu
-        if (mu > 0) {
-            neg2logL -= n * std::log(mu) - mu; // Добавляем вклад бинa в логарифм правдоподобия
+        // -2 ln(L) сумма по всем бинам
+        if (p > 0) {
+            neg2lnL += -2.0 * std::log(p);
         } else {
-            f = 1e20; // Исключаем некорректное значение
-            return;
+            // Если p=0, добавим большой штраф, чтобы M никогда не был отрицательным или слишком маленьким
+            neg2lnL += 1e10; 
         }
     }
 
-    // Аналогично вычисляем вклад второй гистограммы
-    double bw2 = (g_h2->GetXaxis()->GetXmax() - g_h2->GetXaxis()->GetXmin()) / g_h2->GetNbinsX();
-    for (int i = 1; i <= g_h2->GetNbinsX(); ++i) {
-        double n = g_h2->GetBinContent(i);
-        double mu = cst * bw2;
-        if (mu > 0) {
-            neg2logL -= n * std::log(mu) - mu;
+    // Аналогично для h2, где нет сигнала, только фон par[0]
+    for (int i = 1; i <= h2->GetNbinsX(); i++) {
+        int N = (int)h2->GetBinContent(i);
+        double M = par[0];
+        if (M <= 0) M = 1e-9;
+        double p = TMath::Poisson(N, M);
+        if (p > 0) {
+            neg2lnL += -2.0 * std::log(p);
         } else {
-            f = 1e20;
-            return;
+            neg2lnL += 1e10;
         }
     }
 
-    // Итоговая функция минимизации
-    f = neg2logL * 2.0;
+    f = neg2lnL;
 }
 
-// Функция для подгонки и расчета N_signal
-// Возвращает число событий под нормальным распределением
-double FitAndGetNsignal(int nbins, double xlow, double xup) {
-    // Создаем временные гистограммы для данных
-    TH1D *h1 = new TH1D(Form("h1_temp_%d", nbins), "Data 1", nbins, xlow, xup);
-    TH1D *h2 = new TH1D(Form("h2_temp_%d", nbins), "Data 2", nbins, xlow, xup);
-
-    // Заполняем первую гистограмму из файла data_1.dat
-    {
-        std::ifstream in1("data_1.dat");
-        double val;
-        while (in1 >> val) {
-            if (val >= xlow && val <= xup) h1->Fill(val);
-        }
-    }
-
-    // Заполняем вторую гистограмму из файла data_2.dat
-    {
-        std::ifstream in2("data_2.dat");
-        double val;
-        while (in2 >> val) {
-            if (val >= xlow && val <= xup) h2->Fill(val);
-        }
-    }
-
-    // Передаем гистограммы в глобальные переменные
-    g_h1 = h1;
-    g_h2 = h2;
-
-    // Инициализируем объект TMinuit для минимизации
-    TMinuit gMinuit(4); // 4 параметра
-    gMinuit.SetFCN(fcn_poisson);
-
-    // Устанавливаем начальные значения параметров и шаги
-    double p0 = 5, p1 = 40, p2 = 550, p3 = 10; // Начальные значения
-    double step = 0.1; // Шаги минимизации
-    gMinuit.DefineParameter(0, "const", p0, step, 0, 1e6);
-    gMinuit.DefineParameter(1, "amplitude", p1, step, 0, 1e6);
-    gMinuit.DefineParameter(2, "mean", p2, step, 500, 600);
-    gMinuit.DefineParameter(3, "sigma", p3, step, 0.1, 100);
-
-    // Выполняем минимизацию
-    gMinuit.Command("MIGRAD");
-    gMinuit.Command("HESSE");
-
-    // Извлекаем параметры подгонки
-    double par[4], err[4];
-    for (int i = 0; i < 4; ++i) gMinuit.GetParameter(i, par[i], err[i]);
-
-    // Вычисляем N_signal как площадь под кривой гауссовского распределения
-    double N_signal = par[1] * par[3] * std::sqrt(2 * M_PI);
-
-    // Очищаем временные гистограммы
-    delete h1;
-    delete h2;
-
-    return N_signal;
-}
-
-// Главная функция
 void task11() {
-    // Устанавливаем стили графиков
-    gStyle->SetOptStat(1); // Отображение статистики
-    gStyle->SetOptFit(0);  // Отключение результатов подгонки на графике
+    gStyle->SetOptStat(1);
+    gStyle->SetOptFit(0);
 
-    double xlow = 500, xup = 600; // Диапазон гистограмм
-    int nbins = 100; // Количество бинов
+    // Создаем гистограммы
+    h1 = new TH1D("h1","Data 1",100,500,600);
+    h2 = new TH1D("h2","Data 2",100,500,600);
 
-    // Создаем гистограммы для данных
-    TH1D *h1 = new TH1D("h1_11", "Data 1", nbins, xlow, xup);
-    TH1D *h2 = new TH1D("h2_11", "Data 2", nbins, xlow, xup);
-
-    // Чтение и заполнение данных для гистограмм
     {
-        std::ifstream in1("data_1.dat");
+        std::ifstream in("data_1.dat");
+        if(!in) {
+            std::cerr << "Не удалось открыть data_1.dat" << std::endl;
+            return;
+        }
         double val;
-        while (in1 >> val) {
-            if (val >= xlow && val <= xup) h1->Fill(val);
+        while(in >> val) {
+            if(val>=500 && val<=600) h1->Fill(val);
         }
-
-        std::ifstream in2("data_2.dat");
-        while (in2 >> val) {
-            if (val >= xlow && val <= xup) h2->Fill(val);
-        }
+        in.close();
     }
 
-    g_h1 = h1; // Передаем глобальной переменной
-    g_h2 = h2;
+    {
+        std::ifstream in("data_2.dat");
+        if(!in) {
+            std::cerr << "Не удалось открыть data_2.dat" << std::endl;
+            return;
+        }
+        double val;
+        while(in >> val) {
+            if(val>=500 && val<=600) h2->Fill(val);
+        }
+        in.close();
+    }
 
-    // Минимизация и извлечение параметров
-    TMinuit gMinuit(4);
-    gMinuit.SetFCN(fcn_poisson);
+    TMinuit *gMinuit = new TMinuit(4);
+    gMinuit->SetFCN(fcn);
 
-    double p0 = 5, p1 = 40, p2 = 550, p3 = 10;
-    double step = 0.1;
-    gMinuit.DefineParameter(0, "const", p0, step, 0, 1e6);
-    gMinuit.DefineParameter(1, "amplitude", p1, step, 0, 1e6);
-    gMinuit.DefineParameter(2, "mean", p2, step, 500, 600);
-    gMinuit.DefineParameter(3, "sigma", p3, step, 0.1, 100);
+    double p0=5.0;   // const фон
+    double p1=40.0;  // amplitude (общее число событий под гауссом)
+    double p2=550.0; // mean
+    double p3=10.0;  // sigma
 
-    gMinuit.Command("MIGRAD");
-    gMinuit.Command("HESSE");
+    double step=0.1;
+    gMinuit->DefineParameter(0,"const", p0, step, 0, 1e6);
+    gMinuit->DefineParameter(1,"amplitude", p1, step, 0, 1e6);
+    gMinuit->DefineParameter(2,"mean", p2, step, 500, 600);
+    gMinuit->DefineParameter(3,"sigma", p3, step, 0.1, 100);
+
+    gMinuit->Command("MIGRAD");
+    gMinuit->Command("HESSE");
 
     double par[4], err[4];
-    for (int i = 0; i < 4; ++i) gMinuit.GetParameter(i, par[i], err[i]);
+    for (int i=0;i<4;i++){
+        gMinuit->GetParameter(i,par[i],err[i]);
+    }
 
-    double N_signal = par[1] * par[3] * std::sqrt(2 * M_PI);
-    std::cout << "N_signal (nbins=100) = " << N_signal << std::endl;
+    // Подсчитаем финальное значение -2ln(L)
+    double final_n2lnL;
+    {
+        Int_t npar=4;
+        Double_t *gin=0;
+        Int_t iflag=0;
+        fcn(npar, gin, final_n2lnL, par, iflag);
+    }
+
+    int nparams = 4;
+    int nbins_total = h1->GetNbinsX() + h2->GetNbinsX();
+    int ndof = nbins_total - nparams;
+
+    // Число событий под гауссом = par[1], ошибка = err[1]
+    double N_signal = par[1];
+    double N_signal_err = err[1];
+
+    // Проверка интеграла гауссианы:
+    // Интеграл гаусса от -∞ до +∞ с коэффициентом должен дать N_signal.
+    // Проверим:
+    {
+        TF1 *gaussCheck = new TF1("gaussCheck","[0]/([2]*sqrt(2*pi))*exp(-0.5*((x-[1])*(x-[1]))/([2]*[2]))",-1e6,1e6);
+        gaussCheck->SetParameters(par[1],par[2],par[3]);
+        double numeric_integral = gaussCheck->Integral(-1e6,1e6);
+        std::cout << "Число событий под гауссом (числ. интеграл) = " << numeric_integral << std::endl;
+        delete gaussCheck;
+    }
+
+    std::cout << "Результаты подгонки (MLE):" << std::endl;
+    std::cout << "const = " << par[0] << " ± " << err[0] << std::endl;
+    std::cout << "amplitude (N_signal) = " << par[1] << " ± " << err[1] << std::endl;
+    std::cout << "mean = " << par[2] << " ± " << err[2] << std::endl;
+    std::cout << "sigma = " << par[3] << " ± " << err[3] << std::endl;
+    std::cout << "-2ln(L) = " << final_n2lnL << ", d.o.f = " << ndof << std::endl;
+
+    // Построение гистограмм с подгонкой
+    TCanvas *c = new TCanvas("c","Fits",1200,600);
+    c->Divide(2,1);
+
+    c->cd(1);
+    h1->SetMarkerStyle(20);
+    h1->SetMarkerColor(kBlue);
+    h1->SetTitle("Data 1 with ML fit; x; counts");
+    h1->Draw("E");
+
+    TF1 *f1 = new TF1("f1","[0] + ([1]/([3]*sqrt(2*pi)))*exp(-0.5*((x-[2])*(x-[2]))/([3]*[3]))",500,600);
+    f1->SetParameters(par[0],par[1],par[2],par[3]);
+    f1->SetLineColor(kRed);
+    f1->Draw("SAME");
+
+    {
+        TLegend *leg = new TLegend(0.65,0.75,0.9,0.9);
+        leg->AddEntry(h1,"Data 1","p");
+        leg->AddEntry(f1,"Const+Gauss (MLE)","l");
+        leg->Draw();
+    }
+
+    c->cd(2);
+    h2->SetMarkerStyle(20);
+    h2->SetMarkerColor(kBlue);
+    h2->SetTitle("Data 2 with ML fit; x; counts");
+    h2->Draw("E");
+
+    TF1 *f2 = new TF1("f2","[0]",500,600);
+    f2->SetParameter(0,par[0]);
+    f2->SetLineColor(kRed);
+    f2->Draw("SAME");
+
+    {
+        TLegend *leg2 = new TLegend(0.65,0.75,0.9,0.9);
+        leg2->AddEntry(h2,"Data 2","p");
+        leg2->AddEntry(f2,"Const (MLE)","l");
+        leg2->Draw();
+    }
+
+    c->Update();
+    c->SaveAs("ml_fit_results.png");
+
+    // Построим контуры ошибок для двух параметров, например (const, amplitude)
+    // Устанавливаем error def для контуров ошибок
+    gMinuit->SetErrorDef(2.25);
+
+    TCanvas *c2 = new TCanvas("c2","Contours",800,600);
+    TGraph *gr12 = (TGraph*)gMinuit->Contour(40,0,1); // Контур по параметрам const vs amplitude
+    gr12->SetTitle("Errors Contour; const; amplitude");
+    gr12->SetFillColor(42);
+    gr12->Draw("ALF");
+
+    // Сохраним для наглядности
+    c2->SaveAs("errors_contour.png");
 }
