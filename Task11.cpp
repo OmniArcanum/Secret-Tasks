@@ -24,26 +24,31 @@ static std::vector<double> data2;
 void fcn_11(Int_t &npar, Double_t *gin, Double_t &f, Double_t *par, Int_t iflag) {
     double neg2lnL = 0.0;
 
-    // h1_11: M = par[0] + (par[1]/(sigma*sqrt(2*pi)))*exp(-...)
+    // Модель для первого спектра: par[0] (фон/бин) + гаусс (par[1] - общее число сигналов)
+    // h1_11: M = const + amplitude*(Gauss-плотность)
     for (int i = 1; i <= h1_11->GetNbinsX(); i++) {
         double x = h1_11->GetBinCenter(i);
-        int N = (int)h1_11->GetBinContent(i);
+        int N    = (int)h1_11->GetBinContent(i);
 
+        // Гауссов компонент
         double gauss_val = (par[1]/(par[3]*std::sqrt(2*M_PI))) *
                            std::exp(-0.5*(x - par[2])*(x - par[2])/(par[3]*par[3]));
+        // Суммарная модель
         double M = par[0] + gauss_val;
         if (M <= 0) M = 1e-9;
+
         double p = TMath::Poisson(N, M);
-        neg2lnL += (p>0) ? -2.0*std::log(p) : 1e10;
+        neg2lnL += (p>0) ? -2.0 * std::log(p) : 1e10;
     }
 
-    // h2_11: M = par[0]
+    // Модель для второго спектра: M = const (нет сигнала)
     for (int i = 1; i <= h2_11->GetNbinsX(); i++) {
         int N = (int)h2_11->GetBinContent(i);
         double M = par[0];
         if (M <= 0) M = 1e-9;
+
         double p = TMath::Poisson(N, M);
-        neg2lnL += (p>0) ? -2.0*std::log(p) : 1e10;
+        neg2lnL += (p>0) ? -2.0 * std::log(p) : 1e10;
     }
 
     f = neg2lnL;
@@ -73,10 +78,10 @@ double FitWithBinning_11(int nbins) {
     TMinuit *gMin = new TMinuit(4);
     gMin->SetFCN(fcn_11);
 
-    double p0=5.0;
-    double p1=40.0;
-    double p2=550.0;
-    double p3=10.0;
+    double p0=5.0;   // фон/бин
+    double p1=40.0;  // общее число сигналов
+    double p2=550.0; // среднее гаусса
+    double p3=10.0;  // sigma
     double step=0.1;
     gMin->DefineParameter(0,"const", p0, step, 0, 1e6);
     gMin->DefineParameter(1,"amplitude", p1, step, 0, 1e6);
@@ -110,7 +115,7 @@ void task11() {
     gStyle->SetOptStat(0);
     gStyle->SetOptFit(0);
 
-    // Считываем данные
+    // 1) Считываем данные
     {
         std::ifstream in("data_1.dat");
         if(!in) {
@@ -137,7 +142,7 @@ void task11() {
         in.close();
     }
 
-    // Основной фит с 100 бинами
+    // 2) Основной фит с 100 бинами
     int nbins_default = 100;
     h1_11 = new TH1D("h1_11","Data 1",nbins_default,500,600);
     h2_11 = new TH1D("h2_11","Data 2",nbins_default,500,600);
@@ -152,11 +157,12 @@ void task11() {
     TMinuit *gMinuit = new TMinuit(4);
     gMinuit->SetFCN(fcn_11);
 
-    double p0=5.0;
-    double p1=40.0;
-    double p2=550.0;
-    double p3=10.0;
+    double p0=5.0;    // фон/бин
+    double p1=40.0;   // общее число сигналов
+    double p2=550.0;  // среднее гаусса
+    double p3=10.0;   // sigma
     double step=0.1;
+
     gMinuit->DefineParameter(0,"const", p0, step, 0, 1e6);
     gMinuit->DefineParameter(1,"amplitude", p1, step, 0, 1e6);
     gMinuit->DefineParameter(2,"mean", p2, step, 500, 600);
@@ -166,20 +172,39 @@ void task11() {
     gMinuit->Command("HESSE");
 
     double par[4], err[4];
-    for (int i=0;i<4;i++){
+    for (int i=0; i<4; i++){
         gMinuit->GetParameter(i,par[i],err[i]);
     }
 
-    double N_signal = par[1];
+    double N_signal     = par[1];
     double N_signal_err = err[1];
 
-    // Вывод результатов
-    std::cout << "N_signal = " << N_signal << " ± " << N_signal_err << std::endl;
+    // Пример вычисления общего фона и сигнала (как в программе (1)):
+    double bkgTotal = par[0]*h1_11->GetNbinsX(); // фон = const * кол-во бинов
+    double sigTotal = N_signal;                  // сигнал = amplitude
 
-    // Построение гистограмм с подгонкой (как было раньше)
+    // 3) Вывод результатов в терминал
+    std::cout << "================ Fit results ================" << std::endl;
+    std::cout << "N_signal (fitted)   = " << N_signal << " ± " << N_signal_err << std::endl;
+    std::cout << "Total background    = " << bkgTotal << std::endl;
+    std::cout << "=============================================" << std::endl;
+
+    // Можно при желании сохранить в текстовый файл (примерно как в программе (1)):
+    /*
+    {
+       std::ofstream ofile("result_fit.txt");
+       ofile << "=== Fit results ===" << std::endl;
+       ofile << "N_signal = " << N_signal << " ± " << N_signal_err << std::endl;
+       ofile << "Bkg_total= " << bkgTotal  << std::endl;
+       ofile.close();
+    }
+    */
+
+    // 4) Построение гистограмм с подгонкой (как было у вас)
     TCanvas *c = new TCanvas("c","Fits",1200,600);
     c->Divide(2,1);
 
+    // Левая часть: Data 1 + Gauss+Const
     c->cd(1);
     h1_11->SetMarkerStyle(20);
     h1_11->SetMarkerColor(kBlue);
@@ -198,6 +223,7 @@ void task11() {
         leg->Draw();
     }
 
+    // Правая часть: Data 2 + Const
     c->cd(2);
     h2_11->SetMarkerStyle(20);
     h2_11->SetMarkerColor(kBlue);
@@ -219,7 +245,7 @@ void task11() {
     c->Update();
     c->SaveAs("ml_fit_results.png");
 
-    // Построить зависимость N_signal от числа бинов
+    // 5) Строим зависимость N_signal от числа бинов
     std::vector<int> binNumbers = {50,75,100,125,150};
     std::vector<double> Nsignals;
     for (auto nb : binNumbers) {
@@ -237,17 +263,18 @@ void task11() {
     gNvsBins->Draw("AP");
     c2->SaveAs("Nsignal_vs_bins.png");
 
-    // Построение контуров ошибок
-    // Сначала внутренний контур при текущем ErrorDef=1
+    // 6) Построение контуров ошибок
     TCanvas *c3 = new TCanvas("c3","Errors Contour",600,600);
-    TGraph *gr_inner = (TGraph*)gMinuit->Contour(40,0,1); // внутренний контур
+
+    // Сначала внутренний контур (по умолчанию ErrorDef=1)
+    TGraph *gr_inner = (TGraph*)gMinuit->Contour(40,1,2); // (amplitude, mean)
 
     // Теперь устанавливаем другой ErrorDef для внешнего контура
     gMinuit->SetErrorDef(2.25);
-    TGraph *gr_outer = (TGraph*)gMinuit->Contour(40,0,1);
+    TGraph *gr_outer = (TGraph*)gMinuit->Contour(40,1,2);
 
     if (gr_outer) {
-        gr_outer->SetTitle("Errors Contour; const; amplitude");
+        gr_outer->SetTitle("Errors Contour; amplitude; mean"); // Исправили подпись
         gr_outer->SetFillColor(42);
         gr_outer->Draw("ALF");
         if(gr_inner) gr_inner->Draw("C");
